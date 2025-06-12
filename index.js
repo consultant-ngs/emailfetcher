@@ -12,10 +12,22 @@ app.post('/read-emails', async (req, res) => {
     host,
     port = 993,
     tls = true,
-    search = [['SINCE', new Date().toISOString().slice(0, 10)]],
+    search,
     includeAttachments = false,
     max = 10
   } = req.body;
+
+  // ✅ Basic input validation
+  if (!email || !password || !host) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing required fields: email, password, or host',
+    });
+  }
+
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  const defaultSearch = [['SINCE', date.toISOString().slice(0, 10)]];
 
   const config = {
     imap: {
@@ -35,15 +47,19 @@ app.post('/read-emails', async (req, res) => {
     const fetchOptions = {
       bodies: [''],
       markSeen: false,
-      struct: true
+      struct: true,
     };
 
-    const messages = await connection.search(search, fetchOptions);
+    const messages = await connection.search(search || defaultSearch, fetchOptions);
     const results = [];
 
     for (const message of messages.slice(0, max)) {
-      const all = imaps.getParts(message.attributes.struct);
-      const partsToFetch = all.filter(p => p.disposition == null || (includeAttachments && p.disposition?.type?.toUpperCase() === 'ATTACHMENT'));
+      const allParts = imaps.getParts(message.attributes.struct);
+      const partsToFetch = allParts.filter(p => {
+        const isText = !p.disposition;
+        const isAttachment = p.disposition?.type?.toUpperCase() === 'ATTACHMENT';
+        return isText || (includeAttachments && isAttachment);
+      });
 
       const parsedMessage = {
         from: '',
@@ -57,18 +73,18 @@ app.post('/read-emails', async (req, res) => {
         const partData = await connection.getPartData(message, part);
         const parsed = await simpleParser(partData);
 
-        if (parsed.text && !parsedMessage.text) parsedMessage.text = parsed.text;
-        if (parsed.subject && !parsedMessage.subject) parsedMessage.subject = parsed.subject;
-        if (parsed.from && !parsedMessage.from) parsedMessage.from = parsed.from.text;
-        if (parsed.date && !parsedMessage.date) parsedMessage.date = parsed.date;
+        parsedMessage.from = parsed.from?.text || parsedMessage.from;
+        parsedMessage.subject = parsed.subject || parsedMessage.subject;
+        parsedMessage.date = parsed.date || parsedMessage.date;
+        parsedMessage.text = parsed.text || parsedMessage.text;
 
         if (includeAttachments && parsed.attachments?.length) {
-          parsedMessage.attachments = parsed.attachments.map(a => ({
+          parsedMessage.attachments.push(...parsed.attachments.map(a => ({
             filename: a.filename,
             contentType: a.contentType,
             size: a.size,
             base64: a.content.toString('base64'),
-          }));
+          })));
         }
       }
 
@@ -78,7 +94,7 @@ app.post('/read-emails', async (req, res) => {
     await connection.end();
     res.json({ success: true, count: results.length, emails: results });
   } catch (err) {
-    console.error(err);
+    console.error('[IMAP ERROR]', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
